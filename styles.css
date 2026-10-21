@@ -681,3 +681,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 @media (max-width: 380px) {
   .form-grid { grid-template-columns: 1fr; }
 }
+
+/* ----- Laatst opgeslagen ----- */
+#lastSaved:empty { display: none; }

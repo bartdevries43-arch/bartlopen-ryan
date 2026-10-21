@@ -285,11 +285,94 @@ const BADGES = [
 /* ================================================================== *
  *  State
  * ================================================================== */
-function loadLog() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }
-  catch { return {}; }
+const LEGACY_KEYS = CONFIG.legacyKeys || [];
+
+function leesSleutel(k) {
+  try { const v = JSON.parse(localStorage.getItem(k)); return v && typeof v === "object" ? v : null; }
+  catch { return null; }
 }
-function saveLog() { localStorage.setItem(STORE_KEY, JSON.stringify(log)); }
+function aantalSessies(o) { return o ? Object.keys(o).filter((k) => /^w\d+-/.test(k)).length : 0; }
+function samenvoegen(hoofd, extra) { return { ...extra, ...hoofd }; }
+
+/* Voortgang laden. Staat er iets onder een oudere opslagsleutel, dan nemen we
+   dat over, zodat niemand zijn afgevinkte trainingen kwijtraakt. */
+function loadLog() {
+  let uit = leesSleutel(STORE_KEY) || {};
+  const eigen = aantalSessies(uit);
+  LEGACY_KEYS.forEach((k) => {
+    const oud = leesSleutel(k);
+    if (aantalSessies(oud)) uit = samenvoegen(uit, oud);
+  });
+  if (aantalSessies(uit) > eigen) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(uit)); } catch {}
+  }
+  return uit;
+}
+function saveLog() {
+  log.__saved = Date.now();
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(log)); } catch {}
+  idbZet(log);
+  renderLaatstOpgeslagen();
+}
+
+/* ----- Tweede back-up in IndexedDB ---------------------------------- *
+ *  localStorage kan door de browser worden opgeruimd. Elke opslag gaat
+ *  daarom ook naar IndexedDB; bij opstarten halen we terug wat vollediger is.
+ * -------------------------------------------------------------------- */
+const IDB_NAAM = "bartlopen-runcoach", IDB_STORE = "logs";
+function idbOpen() {
+  return new Promise((ok, nee) => {
+    if (!window.indexedDB) return nee(new Error("geen indexedDB"));
+    const r = indexedDB.open(IDB_NAAM, 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains(IDB_STORE)) r.result.createObjectStore(IDB_STORE);
+    };
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => nee(r.error);
+  });
+}
+async function idbZet(data) {
+  try {
+    const db = await idbOpen();
+    await new Promise((ok, nee) => {
+      const t = db.transaction(IDB_STORE, "readwrite");
+      t.objectStore(IDB_STORE).put(JSON.parse(JSON.stringify(data)), STORE_KEY);
+      t.oncomplete = ok; t.onerror = () => nee(t.error);
+    });
+  } catch {}
+}
+async function idbHaal() {
+  try {
+    const db = await idbOpen();
+    return await new Promise((ok, nee) => {
+      const t = db.transaction(IDB_STORE, "readonly");
+      const q = t.objectStore(IDB_STORE).get(STORE_KEY);
+      q.onsuccess = () => ok(q.result || null);
+      q.onerror = () => nee(q.error);
+    });
+  } catch { return null; }
+}
+function herstelUitBackup() {
+  return idbHaal().then((kopie) => {
+    if (!kopie) { idbZet(log); return false; }
+    if (aantalSessies(kopie) > aantalSessies(log)) {
+      log = samenvoegen(log, kopie);
+      saveLog(); renderAll();
+      toast("Je voortgang is teruggehaald 🔄");
+      return true;
+    }
+    idbZet(log);
+    return false;
+  }).catch(() => false);
+}
+function renderLaatstOpgeslagen() {
+  const el = document.getElementById("lastSaved");
+  if (!el) return;
+  const t = log.__saved;
+  if (!t) { el.textContent = ""; return; }
+  const d = new Date(t), pad = (n) => String(n).padStart(2, "0");
+  el.textContent = `Laatst opgeslagen: ${d.getDate()}-${pad(d.getMonth() + 1)} om ${pad(d.getHours())}:${pad(d.getMinutes())} · ${aantalSessies(log)} trainingen ingevuld`;
+}
 let log = loadLog();
 
 const sid = (week, day) => `w${week}-${day}`;
@@ -1202,6 +1285,8 @@ $("pdfBtn").addEventListener("click", () => {
 
 /* Alles tekenen */
 renderAll();
+renderLaatstOpgeslagen();
+herstelUitBackup();
 /* Na de intro-animatie geen her-fade meer; failsafe die alles zeker toont */
 setTimeout(() => { initialRevealDone = true; }, 900);
 setTimeout(() => document.querySelectorAll(".reveal:not(.in)").forEach((el) => el.classList.add("in")), 1600);
